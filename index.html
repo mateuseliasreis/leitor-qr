@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Leitor QR</title>
+  <style>
+    :root {
+      --frame: min(68vw, 68vh, 360px);
+      --green: #16c060;
+      --corner: 34px;
+      --stroke: 5px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #000; color: #fff;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      -webkit-user-select: none; user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: none;
+    }
+
+    /* Câmera em tela cheia */
+    #video {
+      position: fixed; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      background: #000;
+    }
+
+    /* Overlay com moldura central */
+    #overlay {
+      position: fixed; inset: 0;
+      display: grid; place-items: center;
+      pointer-events: none;
+    }
+    .frame {
+      position: relative;
+      width: var(--frame); height: var(--frame);
+      border-radius: 22px;
+      /* escurece tudo fora da moldura */
+      box-shadow: 0 0 0 200vmax rgba(0, 0, 0, 0.55);
+      transition: transform .25s ease;
+    }
+    .corner {
+      position: absolute;
+      width: var(--corner); height: var(--corner);
+      border: var(--stroke) solid #fff;
+      transition: border-color .2s ease;
+    }
+    .tl { top: 0; left: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 22px; }
+    .tr { top: 0; right: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 22px; }
+    .bl { bottom: 0; left: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 22px; }
+    .br { bottom: 0; right: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 22px; }
+
+    .scanline {
+      position: absolute; left: 8%; right: 8%;
+      height: 2px; top: 10%;
+      background: linear-gradient(90deg, transparent, var(--green), transparent);
+      box-shadow: 0 0 12px 2px rgba(22, 192, 96, .7);
+      border-radius: 2px;
+      animation: scan 2.2s ease-in-out infinite alternate;
+    }
+    @keyframes scan { from { top: 8%; } to { top: 92%; } }
+
+    .hint {
+      position: absolute;
+      top: calc(50% + var(--frame) / 2 + 28px);
+      left: 0; right: 0;
+      text-align: center;
+      font-size: clamp(14px, 2.2vmin, 18px);
+      font-weight: 500;
+      letter-spacing: .02em;
+      color: rgba(255,255,255,.85);
+    }
+
+    .status {
+      position: fixed;
+      top: calc(env(safe-area-inset-top, 0px) + 16px);
+      left: 50%; transform: translateX(-50%);
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 14px;
+      border-radius: 999px;
+      background: rgba(0,0,0,.45);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      font-size: 13px; font-weight: 600; letter-spacing: .08em;
+      text-transform: uppercase;
+      pointer-events: none;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #f5a623;
+    }
+    .status.live .dot { background: var(--green); animation: pulse 1.6s infinite; }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(22,192,96,.7); }
+      70% { box-shadow: 0 0 0 8px rgba(22,192,96,0); }
+      100% { box-shadow: 0 0 0 0 rgba(22,192,96,0); }
+    }
+
+    /* Estado de sucesso: moldura verde */
+    body.success .corner { border-color: var(--green); }
+    body.success .frame { transform: scale(1.04); }
+    body.success .scanline { opacity: 0; }
+
+    /* Aviso LIDO! */
+    #toast {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 18px;
+      padding: 24px;
+      background: rgba(10, 150, 70, .92);
+      opacity: 0; visibility: hidden;
+      transition: opacity .18s ease, visibility .18s;
+      pointer-events: none;
+      text-align: center;
+    }
+    #toast.show { opacity: 1; visibility: visible; }
+    #toast .check {
+      width: clamp(84px, 18vmin, 140px);
+      height: clamp(84px, 18vmin, 140px);
+      border-radius: 50%;
+      background: #fff;
+      display: grid; place-items: center;
+      transform: scale(.4);
+    }
+    #toast.show .check { animation: pop .45s cubic-bezier(.2, 1.6, .4, 1) forwards; }
+    #toast .check svg { width: 58%; height: 58%; }
+    #toast .check path {
+      stroke: var(--green); stroke-width: 4; fill: none;
+      stroke-linecap: round; stroke-linejoin: round;
+      stroke-dasharray: 40; stroke-dashoffset: 40;
+    }
+    #toast.show .check path { animation: draw .35s .15s ease-out forwards; }
+    @keyframes pop { to { transform: scale(1); } }
+    @keyframes draw { to { stroke-dashoffset: 0; } }
+
+    #toast h1 {
+      font-size: clamp(64px, 16vmin, 150px);
+      font-weight: 900;
+      letter-spacing: .04em;
+      line-height: 1;
+      text-shadow: 0 4px 24px rgba(0,0,0,.25);
+    }
+    #toast .content {
+      max-width: 90vw;
+      padding: 12px 22px;
+      border-radius: 14px;
+      background: rgba(0,0,0,.22);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: clamp(18px, 4.2vmin, 34px);
+      font-weight: 600;
+      word-break: break-all;
+      max-height: 30vh; overflow: hidden;
+    }
+
+    /* Flash de feedback */
+    #flash {
+      position: fixed; inset: 0;
+      background: #fff;
+      opacity: 0;
+      pointer-events: none;
+    }
+    #flash.go { animation: flash .35s ease-out; }
+    @keyframes flash { 0% { opacity: .7; } 100% { opacity: 0; } }
+
+    /* Erro de câmera */
+    #error {
+      position: fixed; inset: 0;
+      display: none;
+      flex-direction: column; align-items: center; justify-content: center;
+      gap: 16px; padding: 32px;
+      background: #0b0b0c;
+      text-align: center;
+    }
+    #error.show { display: flex; }
+    #error h2 { font-size: 22px; font-weight: 700; }
+    #error p { max-width: 420px; color: rgba(255,255,255,.7); line-height: 1.5; font-size: 15px; }
+    #error button {
+      margin-top: 8px;
+      padding: 14px 28px;
+      border: 0; border-radius: 12px;
+      background: #fff; color: #000;
+      font-size: 16px; font-weight: 700;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay muted playsinline></video>
+
+  <div id="overlay">
+    <div class="frame">
+      <span class="corner tl"></span>
+      <span class="corner tr"></span>
+      <span class="corner bl"></span>
+      <span class="corner br"></span>
+      <div class="scanline"></div>
+    </div>
+    <div class="hint">Posicione o QR Code dentro da moldura</div>
+  </div>
+
+  <div class="status" id="status"><span class="dot"></span><span id="statusText">Iniciando câmera</span></div>
+
+  <div id="flash"></div>
+
+  <div id="toast" aria-live="assertive">
+    <div class="check">
+      <svg viewBox="0 0 36 36"><path d="M9 18.5l6 6 12-13" /></svg>
+    </div>
+    <h1>LIDO!</h1>
+    <div class="content" id="toastContent"></div>
+  </div>
+
+  <div id="error">
+    <h2>Câmera indisponível</h2>
+    <p id="errorMsg">Permita o acesso à câmera para usar o leitor.</p>
+    <button id="retry">Tentar novamente</button>
+  </div>
+
+  <script src="https://unpkg.com/@zxing/browser@0.1.5/umd/zxing-browser.min.js"></script>
+  <script>
+    (() => {
+      // ---- Configuração ----
+      const SHOW_MS = 1500;          // duração do aviso "LIDO!"
+      const SAME_CODE_COOLDOWN = 3000; // tempo mínimo para aceitar o MESMO código de novo
+
+      const video = document.getElementById('video');
+      const toast = document.getElementById('toast');
+      const toastContent = document.getElementById('toastContent');
+      const flash = document.getElementById('flash');
+      const statusEl = document.getElementById('status');
+      const statusText = document.getElementById('statusText');
+      const errorEl = document.getElementById('error');
+      const errorMsg = document.getElementById('errorMsg');
+
+      let controls = null;
+      let showing = false;
+      let lastText = null;
+      let lastTime = 0;
+      let hideTimer = null;
+      let wakeLock = null;
+      let audioCtx = null;
+
+      const reader = new ZXingBrowser.BrowserQRCodeReader(undefined, {
+        delayBetweenScanAttempts: 80,
+        delayBetweenScanSuccess: 80,
+      });
+
+      function setStatus(text, live) {
+        statusText.textContent = text;
+        statusEl.classList.toggle('live', !!live);
+      }
+
+      function beep() {
+        try {
+          audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+          if (audioCtx.state === 'suspended') audioCtx.resume();
+          const o = audioCtx.createOscillator();
+          const g = audioCtx.createGain();
+          o.type = 'sine';
+          o.frequency.value = 1760;
+          g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+          g.gain.exponentialRampToValueAtTime(0.25, audioCtx.currentTime + 0.01);
+          g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.15);
+          o.connect(g).connect(audioCtx.destination);
+          o.start();
+          o.stop(audioCtx.currentTime + 0.16);
+        } catch (_) {}
+      }
+
+      function onRead(text) {
+        const now = Date.now();
+        if (showing) return;                                         // aviso ainda na tela
+        if (text === lastText && now - lastTime < SAME_CODE_COOLDOWN) return; // leitura duplicada
+        lastText = text;
+        lastTime = now;
+        showing = true;
+
+        toastContent.textContent = text;
+        document.body.classList.add('success');
+        toast.classList.add('show');
+        flash.classList.remove('go'); void flash.offsetWidth; flash.classList.add('go');
+        if (navigator.vibrate) navigator.vibrate(120);
+        beep();
+
+        clearTimeout(hideTimer);
+        hideTimer = setTimeout(() => {
+          toast.classList.remove('show');
+          document.body.classList.remove('success');
+          showing = false;
+          // conta o intervalo de duplicidade a partir do fim do aviso
+          lastTime = Date.now();
+        }, SHOW_MS);
+      }
+
+      async function requestWakeLock() {
+        try {
+          if ('wakeLock' in navigator && document.visibilityState === 'visible') {
+            wakeLock = await navigator.wakeLock.request('screen');
+          }
+        } catch (_) {}
+      }
+
+      function stop() {
+        if (controls) { try { controls.stop(); } catch (_) {} controls = null; }
+      }
+
+      async function start() {
+        stop();
+        errorEl.classList.remove('show');
+        setStatus('Iniciando câmera', false);
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          return showError('Este navegador não permite acesso à câmera. Abra a página via HTTPS em um navegador atualizado.');
+        }
+
+        try {
+          controls = await reader.decodeFromConstraints(
+            {
+              audio: false,
+              video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+              },
+            },
+            video,
+            (result) => { if (result) onRead(result.getText()); }
+          );
+          setStatus('Leitura ativa', true);
+          requestWakeLock();
+
+          // Se a câmera cair (ex.: outro app pegou a câmera), reinicia sozinho
+          const stream = video.srcObject;
+          if (stream) {
+            stream.getVideoTracks().forEach(t => {
+              t.addEventListener('ended', () => setTimeout(start, 500));
+            });
+          }
+        } catch (err) {
+          console.error(err);
+          const name = err && err.name;
+          if (name === 'NotAllowedError' || name === 'SecurityError') {
+            showError('O acesso à câmera foi negado. Libere a permissão da câmera nas configurações do navegador e tente novamente.');
+          } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+            showError('Nenhuma câmera foi encontrada neste dispositivo.');
+          } else if (name === 'NotReadableError') {
+            showError('A câmera está sendo usada por outro aplicativo. Feche-o e tente novamente.');
+          } else {
+            showError('Não foi possível iniciar a câmera. Verifique se a página está em HTTPS.');
+          }
+        }
+      }
+
+      function showError(msg) {
+        setStatus('Câmera parada', false);
+        errorMsg.textContent = msg;
+        errorEl.classList.add('show');
+      }
+
+      document.getElementById('retry').addEventListener('click', start);
+
+      // Ao voltar para a aba/app, garante que a câmera está ativa
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible') return;
+        requestWakeLock();
+        const stream = video.srcObject;
+        const alive = stream && stream.getVideoTracks().some(t => t.readyState === 'live');
+        if (!alive && !errorEl.classList.contains('show')) start();
+        else video.play().catch(() => {});
+      });
+
+      // Desbloqueia o áudio do bip no primeiro toque (exigência do iOS/Chrome)
+      document.addEventListener('pointerdown', () => {
+        try {
+          audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+          audioCtx.resume();
+        } catch (_) {}
+      }, { once: true });
+
+      if (!window.ZXingBrowser) {
+        showError('Não foi possível carregar a biblioteca de leitura. Verifique a conexão com a internet.');
+      } else {
+        start();
+      }
+    })();
+  </script>
+</body>
+</html>
