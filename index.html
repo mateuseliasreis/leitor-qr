@@ -248,10 +248,88 @@
       let wakeLock = null;
       let audioCtx = null;
 
-      const reader = new ZXingBrowser.BrowserQRCodeReader(undefined, {
-        delayBetweenScanAttempts: 80,
-        delayBetweenScanSuccess: 80,
-      });
+      // ---- Decodificação rápida ----
+      // 1) BarcodeDetector nativo (Android/Chrome, muito rápido) quando existir
+      // 2) Senão, ZXing lendo só um recorte pequeno da área da moldura
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      const frameEl = document.querySelector('.frame');
+      let detector = null;
+      let zxing = null;
+      let stream = null;
+      let gen = 0;
+      let flip = false;
+
+      async function initDecoder() {
+        if (detector || zxing) return;
+        if ('BarcodeDetector' in window) {
+          try {
+            const formats = await BarcodeDetector.getSupportedFormats();
+            if (formats.includes('qr_code')) {
+              detector = new BarcodeDetector({ formats: ['qr_code'] });
+              return;
+            }
+          } catch (_) {}
+        }
+        zxing = new ZXingBrowser.BrowserQRCodeReader();
+      }
+
+      // Converte a moldura da tela para coordenadas do vídeo (object-fit: cover)
+      function cropRect() {
+        const vw = video.videoWidth, vh = video.videoHeight;
+        const sw = window.innerWidth, sh = window.innerHeight;
+        const scale = Math.max(sw / vw, sh / vh);
+        const f = frameEl.getBoundingClientRect();
+        const size = Math.min((f.width * 1.4) / scale, vw, vh); // margem de 40% ao redor
+        const cx = (f.left + f.width / 2 - (sw - vw * scale) / 2) / scale;
+        const cy = (f.top + f.height / 2 - (sh - vh * scale) / 2) / scale;
+        return {
+          sx: Math.max(0, Math.min(vw - size, cx - size / 2)),
+          sy: Math.max(0, Math.min(vh - size, cy - size / 2)),
+          size,
+        };
+      }
+
+      async function decodeFrame() {
+        if (detector) {
+          const codes = await detector.detect(video);
+          return codes.length ? codes[0].rawValue : null;
+        }
+        // Alterna: recorte da moldura (pequeno e rápido) / quadro inteiro reduzido
+        // (pega QR Codes grandes ou muito próximos que passam da moldura)
+        const vw = video.videoWidth, vh = video.videoHeight;
+        let sx, sy, sw, sh, dw, dh;
+        flip = !flip;
+        if (flip) {
+          const r = cropRect();
+          sx = r.sx; sy = r.sy; sw = sh = r.size;
+          dw = dh = Math.round(Math.min(r.size, 640));
+        } else {
+          const k = Math.min(1, 720 / Math.max(vw, vh));
+          sx = 0; sy = 0; sw = vw; sh = vh;
+          dw = Math.round(vw * k); dh = Math.round(vh * k);
+        }
+        if (canvas.width !== dw) canvas.width = dw;
+        if (canvas.height !== dh) canvas.height = dh;
+        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh);
+        try { return zxing.decodeFromCanvas(canvas).getText(); } catch (_) { return null; }
+      }
+
+      function schedule(g) {
+        if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(() => tick(g));
+        else requestAnimationFrame(() => tick(g));
+      }
+
+      async function tick(g) {
+        if (g !== gen) return;
+        if (!showing && video.readyState >= 2 && video.videoWidth) {
+          try {
+            const text = await decodeFrame();
+            if (text && g === gen) onRead(text);
+          } catch (_) {}
+        }
+        schedule(g);
+      }
 
       function setStatus(text, live) {
         statusText.textContent = text;
@@ -309,7 +387,8 @@
       }
 
       function stop() {
-        if (controls) { try { controls.stop(); } catch (_) {} controls = null; }
+        gen++;
+        if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
       }
 
       async function start() {
@@ -322,28 +401,34 @@
         }
 
         try {
-          controls = await reader.decodeFromConstraints(
-            {
-              audio: false,
-              video: {
-                facingMode: { ideal: 'environment' },
-                width: { ideal: 1920 },
-                height: { ideal: 1080 },
-              },
+          await initDecoder();
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              frameRate: { ideal: 30 },
             },
-            video,
-            (result) => { if (result) onRead(result.getText()); }
-          );
-          setStatus('Leitura ativa', true);
-          requestWakeLock();
+          });
+          video.srcObject = stream;
+          await video.play().catch(() => {});
+
+          const track = stream.getVideoTracks()[0];
+          // Foco contínuo, quando o aparelho permitir
+          try {
+            const caps = track.getCapabilities ? track.getCapabilities() : {};
+            if (caps.focusMode && caps.focusMode.includes('continuous')) {
+              await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+            }
+          } catch (_) {}
 
           // Se a câmera cair (ex.: outro app pegou a câmera), reinicia sozinho
-          const stream = video.srcObject;
-          if (stream) {
-            stream.getVideoTracks().forEach(t => {
-              t.addEventListener('ended', () => setTimeout(start, 500));
-            });
-          }
+          track.addEventListener('ended', () => setTimeout(start, 500));
+
+          setStatus('Leitura ativa', true);
+          requestWakeLock();
+          schedule(gen);
         } catch (err) {
           console.error(err);
           const name = err && err.name;
