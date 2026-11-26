@@ -70,7 +70,7 @@
 
     .hint {
       position: absolute;
-      top: calc(50% + var(--frame) / 2 + 28px);
+      top: calc(50% - var(--frame) / 2 - 44px);
       left: 0; right: 0;
       text-align: center;
       font-size: clamp(14px, 2.2vmin, 18px);
@@ -170,6 +170,31 @@
     #flash.go { animation: flash .35s ease-out; }
     @keyframes flash { 0% { opacity: .7; } 100% { opacity: 0; } }
 
+    @media (max-height: 520px) { .hint { display: none; } }
+
+    /* Zoom */
+    #video { transform-origin: 50% 50%; transition: transform .2s ease; }
+    .zoom {
+      position: fixed;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 28px);
+      left: 50%; transform: translateX(-50%);
+      display: flex; gap: 6px;
+      padding: 5px;
+      border-radius: 999px;
+      background: rgba(0,0,0,.45);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    }
+    .zoom button {
+      min-width: 52px; height: 44px;
+      padding: 0 12px;
+      border: 0; border-radius: 999px;
+      background: transparent; color: #fff;
+      font: 700 15px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      cursor: pointer;
+      transition: background .15s ease, color .15s ease;
+    }
+    .zoom button.on { background: #fff; color: #000; }
+
     /* Erro de câmera */
     #error {
       position: fixed; inset: 0;
@@ -207,6 +232,12 @@
   </div>
 
   <div class="status" id="status"><span class="dot"></span><span id="statusText">Iniciando câmera</span></div>
+
+  <div class="zoom" id="zoom">
+    <button data-z="1" class="on">1×</button>
+    <button data-z="2">2×</button>
+    <button data-z="4">4×</button>
+  </div>
 
   <div id="flash"></div>
 
@@ -260,6 +291,38 @@
       let gen = 0;
       let flip = false;
 
+      // ---- Zoom ----
+      // Usa o zoom real da câmera quando o aparelho permite (Android/Chrome);
+      // o que faltar é completado com zoom digital (ampliação da imagem).
+      const zoomBar = document.getElementById('zoom');
+      let zoomLevel = Number(localStorage.getItem('qrZoom')) || 1;
+      let digitalZoom = 1;
+
+      async function applyZoom(level) {
+        zoomLevel = level;
+        localStorage.setItem('qrZoom', String(level));
+        zoomBar.querySelectorAll('button').forEach(b =>
+          b.classList.toggle('on', Number(b.dataset.z) === level));
+
+        let nativeZoom = 1;
+        const track = stream && stream.getVideoTracks()[0];
+        try {
+          const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+          if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+            nativeZoom = Math.max(caps.zoom.min, Math.min(caps.zoom.max, level));
+            await track.applyConstraints({ advanced: [{ zoom: nativeZoom }] });
+          }
+        } catch (_) { nativeZoom = 1; }
+
+        digitalZoom = Math.max(1, level / nativeZoom);
+        video.style.transform = digitalZoom > 1 ? `scale(${digitalZoom})` : '';
+      }
+
+      zoomBar.addEventListener('click', (e) => {
+        const b = e.target.closest('button');
+        if (b) applyZoom(Number(b.dataset.z));
+      });
+
       async function initDecoder() {
         if (detector || zxing) return;
         if ('BarcodeDetector' in window) {
@@ -278,7 +341,7 @@
       function cropRect() {
         const vw = video.videoWidth, vh = video.videoHeight;
         const sw = window.innerWidth, sh = window.innerHeight;
-        const scale = Math.max(sw / vw, sh / vh);
+        const scale = Math.max(sw / vw, sh / vh) * digitalZoom;
         const f = frameEl.getBoundingClientRect();
         const size = Math.min((f.width * 1.4) / scale, vw, vh); // margem de 40% ao redor
         const cx = (f.left + f.width / 2 - (sw - vw * scale) / 2) / scale;
@@ -291,15 +354,15 @@
       }
 
       async function decodeFrame() {
-        if (detector) {
-          const codes = await detector.detect(video);
-          return codes.length ? codes[0].rawValue : null;
-        }
-        // Alterna: recorte da moldura (pequeno e rápido) / quadro inteiro reduzido
+        // Alterna: recorte da moldura (pequeno e rápido) / quadro inteiro
         // (pega QR Codes grandes ou muito próximos que passam da moldura)
         const vw = video.videoWidth, vh = video.videoHeight;
         let sx, sy, sw, sh, dw, dh;
         flip = !flip;
+        if (detector && !flip) {
+          const codes = await detector.detect(video);
+          return codes.length ? codes[0].rawValue : null;
+        }
         if (flip) {
           const r = cropRect();
           sx = r.sx; sy = r.sy; sw = sh = r.size;
@@ -312,6 +375,10 @@
         if (canvas.width !== dw) canvas.width = dw;
         if (canvas.height !== dh) canvas.height = dh;
         ctx.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh);
+        if (detector) {
+          const codes = await detector.detect(canvas);
+          return codes.length ? codes[0].rawValue : null;
+        }
         try { return zxing.decodeFromCanvas(canvas).getText(); } catch (_) { return null; }
       }
 
@@ -426,6 +493,7 @@
           // Se a câmera cair (ex.: outro app pegou a câmera), reinicia sozinho
           track.addEventListener('ended', () => setTimeout(start, 500));
 
+          await applyZoom(zoomLevel);
           setStatus('Leitura ativa', true);
           requestWakeLock();
           schedule(gen);
